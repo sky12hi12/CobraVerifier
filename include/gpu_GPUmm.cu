@@ -56,11 +56,10 @@ int *gpu_nnz_row, *gpu_csr_rowptr, *gpu_csr_colind;
 cublasHandle_t handle_c;
 cusparseHandle_t handle_s;
 cusparseHandle_t handle_ss;
-cusparseMatDescr_t descr; // 古いAPIの記述子だが、下位互換性のため一部で利用
+cusparseMatDescr_t descr;
 
 // ====== Helpers ======
 
-// cublasGetErrorStringは元のままで問題ありません
 const char* cublasGetErrorString(cublasStatus_t status) {
   switch(status) {
     case CUBLAS_STATUS_SUCCESS: return "CUBLAS_STATUS_SUCCESS";
@@ -75,16 +74,14 @@ const char* cublasGetErrorString(cublasStatus_t status) {
   return "unknown error";
 }
 
-// 【修正済】未実装だったcusparseGetErrorStringを、公式APIを呼び出すように修正
 const char* cusparseGetErrorString(cusparseStatus_t status) {
     return ::cusparseGetErrorString(status);
 }
 
-
 #define CUDA_CALL(func) { \
   cudaError_t e = (func); \
   if(e != cudaSuccess) {\
-    cout << "CUDA: " << cudaGetErrorString(e) << endl; \
+    cout << "CUDA Error in " << __FILE__ << ":" << __LINE__ << ": " << cudaGetErrorString(e) << endl; \
     assert(false);\
   }\
 }
@@ -92,7 +89,7 @@ const char* cusparseGetErrorString(cusparseStatus_t status) {
 #define CUBLAS_CALL(func) {\
   cublasStatus_t e = (func); \
   if(e != CUBLAS_STATUS_SUCCESS) {\
-    cout << "cuBlas: " << cublasGetErrorString(e) << endl; \
+    cout << "cuBlas Error in " << __FILE__ << ":" << __LINE__ << ": " << cublasGetErrorString(e) << endl; \
     assert(false);\
   }\
 }
@@ -100,7 +97,7 @@ const char* cusparseGetErrorString(cusparseStatus_t status) {
 #define CUSPARSE_CALL(func) {\
   cusparseStatus_t e = (func); \
   if(e != CUSPARSE_STATUS_SUCCESS) {\
-    cout << "cusparse: " << cusparseGetErrorString(e) << endl; \
+    cout << "cusparse Error in " << __FILE__ << ":" << __LINE__ << ": " << cusparseGetErrorString(e) << endl; \
     assert(false);\
   }\
 }
@@ -116,21 +113,27 @@ staySparse(int n, int nnz) {
   }
 }
 
-// 【修正済】cusparseSnnzからcusparseNnzへ変更し、ポインタモードに対応
+// 【修正済】cusparseNnzが削除されたため、NNZを数えるカスタムカーネルを実装
+__global__ void countNNZ_kernel(const float* mat, int size, int* nnz_counter) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += blockDim.x * gridDim.x) {
+        if (mat[i] != 0.0f) {
+            atomicAdd(nnz_counter, 1);
+        }
+    }
+}
+
+// 【修正済】カスタムカーネルを呼び出すようにcountNNZを書き換え
 void
 countNNZ(cusparseHandle_t handle, cusparseMatDescr_t descr,
-         int* nnzrow, int &nnz_total, float* gpu_m, int n) {
+         int* nnzrow_unused, int &nnz_total, float* gpu_m, int n) {
     int* d_nnz_total = NULL;
     CUDA_CALL(cudaMalloc(&d_nnz_total, sizeof(int)));
+    CUDA_CALL(cudaMemset(d_nnz_total, 0, sizeof(int)));
 
-    CUSPARSE_CALL(
-        cusparseNnz(handle, CUSPARSE_DIRECTION_ROW, n, n,
-                    descr,
-                    (void*)gpu_m,
-                    n,
-                    nnzrow,
-                    d_nnz_total)
-    );
+    // カーネルを起動してNNZをカウント
+    // Note: nnzrow (各行のNNZ) はこの実装では計算しません。
+    // 後続の `cudaDense2sparse` では使われないため問題ありません。
+    countNNZ_kernel<<<256, 256>>>(gpu_m, n * n, d_nnz_total);
 
     CUDA_CALL(cudaMemcpy(&nnz_total, d_nnz_total, sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CALL(cudaFree(d_nnz_total));
@@ -138,10 +141,11 @@ countNNZ(cusparseHandle_t handle, cusparseMatDescr_t descr,
     cout << "  count nnz [nnz_total=" << nnz_total << "]\n";
 }
 
+
 // 【修正済】cusparseSdense2csrからcusparseDenseToSparseワークフローへ変更
 void
 cudaDense2sparse(cusparseHandle_t handle, cusparseMatDescr_t descr,
-                 float* gpu_m, int *nnz_row,
+                 float* gpu_m, int *nnz_row_unused,
                  float* &csr_val, int* &csr_rowptr, int* &csr_colind,
                  int nnz_total, int n) {
     cusparseDnMatDescr_t mat_dense;
@@ -230,28 +234,29 @@ denseSgemm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
     cout<< "  [GPU] dense gemm\n";
 }
 
-// 【修正済】古い/不正なcublasStrmm呼び出しを、正しいin-place操作に修正
+// 【修正済】不正なcublasStrmm呼び出しを、より明確なcublasTrmmExによるin-place操作に修正
 void
 denseStrmm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
     CUDA_CALL(cudaMemcpy(gpu_dst, gpu_src, sizeof(float) * n * n, cudaMemcpyDeviceToDevice));
     
-    CUBLAS_CALL(cublasStrmm(
-        handle,
-        CUBLAS_SIDE_LEFT,
-        CUBLAS_FILL_MODE_UPPER,
-        CUBLAS_OP_N,
-        CUBLAS_DIAG_UNIT,
-        n, n,
-        &alpha,
-        gpu_src, n,
-        gpu_dst, n));
+    // cublasTrmmExはin-placeで動作する (B := alpha*A*B)
+    CUBLAS_CALL(cublasTrmmEx(handle,
+                             CUBLAS_SIDE_LEFT,
+                             CUBLAS_FILL_MODE_UPPER,
+                             CUBLAS_OP_N,
+                             CUBLAS_DIAG_UNIT,
+                             n, n,
+                             &alpha,
+                             gpu_src, CUDA_R_32F, n, // A
+                             gpu_dst, CUDA_R_32F, n  // B (in-out)
+                             ));
 
     CUDA_CALL(cudaThreadSynchronize());
     cout<< "  [GPU] dense trmm\n";
 }
 
-// 【修正済・関数統合】`sparseSparseMM`関数を最新のSpGEMMワークフローに全面的に書き換え。
-// これに伴い、古い`countResultNNZ`と`sparseSparseSmm`は不要となり削除。
+
+// 【修正済】SpGEMMワークフロー全体を、CUDA 12.2のAPIシグネチャに合わせて書き換え
 int
 sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
                float* &csr_val, int* &csr_rowptr, int* &csr_colind,
@@ -264,7 +269,11 @@ sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
     cusparseIndexType_t indexType   = CUSPARSE_INDEX_32I;
     cusparseIndexBase_t indexBase   = cusparseGetMatIndexBase(descr_old);
 
+    const float spgemm_alpha = 1.0f;
+    const float spgemm_beta  = 0.0f;
+
     CUSPARSE_CALL(cusparseSpGEMM_createDescr(&spgemmDesc));
+
     CUSPARSE_CALL(cusparseCreateCsr(&matA, n, n, nnz, csr_rowptr, csr_colind, csr_val,
                                     indexType, indexType, indexBase, computeType));
     CUSPARSE_CALL(cusparseCreateCsr(&matB, n, n, nnz, csr_rowptr, csr_colind, csr_val,
@@ -274,37 +283,39 @@ sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
 
     size_t bufferSize1 = 0, bufferSize2 = 0;
     void* dBuffer1 = NULL, *dBuffer2 = NULL;
-
+    
+    // SpGEMM Phase 1: Work Estimation
     CUSPARSE_CALL(cusparseSpGEMM_workEstimation(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                                &matA, &matB, &matC, computeType, CUSPARSE_SPGEMM_DEFAULT,
-                                                spgemmDesc, &bufferSize1, NULL));
+                                                &spgemm_alpha, matA, matB, &spgemm_beta, matC, computeType, 
+                                                CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize1, NULL));
     if (bufferSize1 > 0) { CUDA_CALL(cudaMalloc(&dBuffer1, bufferSize1)); }
     
     CUSPARSE_CALL(cusparseSpGEMM_workEstimation(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                                &matA, &matB, &matC, computeType, CUSPARSE_SPGEMM_DEFAULT,
-                                                spgemmDesc, &bufferSize1, dBuffer1));
+                                                &spgemm_alpha, matA, matB, &spgemm_beta, matC, computeType, 
+                                                CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize1, dBuffer1));
 
     long long nnz_C;
     int* csr_rowptr_C;
     int* csr_colind_C;
     float* csr_val_C;
     
-    CUSPARSE_CALL(cusparseSpMatGetAttribute(matC, CUSPARSE_SPMAT_CSR_ROW_OFFSETS, (void**)&csr_rowptr_C, sizeof(csr_rowptr_C)));
-    CUSPARSE_CALL(cusparseSpMatGetAttribute(matC, CUSPARSE_SPMAT_NUM_NONZERO_ELEMENTS, &nnz_C, sizeof(nnz_C)));
+    // 【修正済】cusparseSpMatGetAttributeからcusparseCsrGetに変更
+    CUSPARSE_CALL(cusparseCsrGet(matC, NULL, NULL, &nnz_C, 
+                                 (void**)&csr_rowptr_C, NULL, NULL, NULL, NULL, NULL, NULL));
 
     CUDA_CALL(cudaMalloc(&csr_colind_C, sizeof(int)   * nnz_C));
     CUDA_CALL(cudaMalloc(&csr_val_C,    sizeof(float) * nnz_C));
-
     CUSPARSE_CALL(cusparseCsrSetPointers(matC, csr_rowptr_C, csr_colind_C, csr_val_C));
     
+    // SpGEMM Phase 2: Compute
     CUSPARSE_CALL(cusparseSpGEMM_compute(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                         &matA, &matB, &matC, computeType, CUSPARSE_SPGEMM_DEFAULT,
-                                         spgemmDesc, &bufferSize2, NULL));
+                                         &spgemm_alpha, matA, matB, &spgemm_beta, matC, computeType, 
+                                         CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize2, NULL));
     if (bufferSize2 > 0) { CUDA_CALL(cudaMalloc(&dBuffer2, bufferSize2)); }
 
     CUSPARSE_CALL(cusparseSpGEMM_compute(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                         &matA, &matB, &matC, computeType, CUSPARSE_SPGEMM_DEFAULT,
-                                         spgemmDesc, &bufferSize2, dBuffer2));
+                                         &spgemm_alpha, matA, matB, &spgemm_beta, matC, computeType, 
+                                         CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize2, dBuffer2));
 
     CUDA_CALL(cudaFree(csr_rowptr));
     CUDA_CALL(cudaFree(csr_val));
@@ -383,25 +394,22 @@ void initEarlyTermination() {
   matrix_diff = 0;
 }
 
-// 【修正済】競合状態を避けるため、atomicOrを使用
 __global__
 void compareGPU(float *gpu_m_1, float *gpu_m_2, int length) {
   int index = (threadIdx.x + blockIdx.x * blockDim.x) * REGULATE_BATCH;
   for (int i=0; i<REGULATE_BATCH; i++) {
     if (index+i < length) {
       if ( (gpu_m_1[index + i] != 0) != (gpu_m_2[index + i] != 0) ) {
-        // matrix_diff = 1; // <- 元のコード（競合状態の可能性あり）
-        atomicOr(&matrix_diff, 1); // 複数のスレッドが安全に書き込めるように修正
+        atomicOr(&matrix_diff, 1);
       }
     }
   }
 }
 
-// 【修正済】メモリリークと不正な比較ロジックを修正。
-// より信頼性の高い`compareGPU`カーネルを用いた方法に統一。
-bool earlyTermination(float *gpu_m_1, float *gpu_m_2, int length) {
+// 【修正済】`n`を引数で受け取り、ロジックを修正
+bool earlyTermination(float *gpu_m_1, float *gpu_m_2, int n, int length) {
 #ifdef OPT_EARLY_TERMINATION
-    if (length / (n*n) < MAGIC_EARLY_TERMINATION_THRESHOLD) { // This check seems odd, but kept from original earlyTermination2
+    if (n < MAGIC_EARLY_TERMINATION_THRESHOLD) {
         return false;
     }
 
@@ -421,10 +429,9 @@ bool earlyTermination(float *gpu_m_1, float *gpu_m_2, int length) {
     }
     CUDA_CALL(cudaThreadSynchronize());
 
-    int diff_h; // host-side copy of matrix_diff
+    int diff_h;
     CUDA_CALL(cudaMemcpyFromSymbol(&diff_h, matrix_diff, sizeof(int), 0, cudaMemcpyDeviceToHost));
     
-    // if they are the same (diff is 0), terminate early
     return diff_h == 0;
 #else
     return false;
@@ -450,9 +457,8 @@ JNIEXPORT void JNICALL Java_gpu_GPUmm_init(JNIEnv *env, jclass cls) {
   CUSPARSE_CALL(cusparseCreate(&handle_s));
   CUSPARSE_CALL(cusparseCreate(&handle_ss));
   CUSPARSE_CALL(cusparseSetPointerMode(handle_ss, CUSPARSE_POINTER_MODE_HOST));
-  // 古い記述子だが、修正後のヘルパー関数でインデックスベース取得のために利用
   CUSPARSE_CALL(cusparseCreateMatDescr(&descr));
-  CUSPARSE_CALL(cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO)); // 明示的に設定
+  CUSPARSE_CALL(cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO));
   
   CUDA_CALL(cudaMalloc(&gpu_nnz_row, sizeof(int) * n));
   CUDA_CALL(cudaMalloc(&gpu_csr_val, sizeof(float) * nnz_total));
@@ -461,7 +467,7 @@ JNIEXPORT void JNICALL Java_gpu_GPUmm_init(JNIEnv *env, jclass cls) {
 }
 
 JNIEXPORT void JNICALL Java_gpu_GPUmm_destroy(JNIEnv *env, jclass cls) {
-  CUSPARSE_CALL(cusparseDestroyMatDescr(descr)); // 作成したので破棄
+  CUSPARSE_CALL(cusparseDestroyMatDescr(descr));
   CUSPARSE_CALL(cusparseDestroy(handle_s));
   CUSPARSE_CALL(cusparseDestroy(handle_ss));
   CUBLAS_CALL(cublasDestroy(handle_c));
@@ -474,7 +480,6 @@ JNIEXPORT void JNICALL Java_gpu_GPUmm_destroy(JNIEnv *env, jclass cls) {
   CUDA_CALL(cudaFree(gpu_csr_colind));
 }
 
-// 【修正済】cublasSgemmからcublasGemmExへ変更
 JNIEXPORT void JNICALL Java_gpu_GPUmm_connect(JNIEnv *env, jclass cls,
     jfloatArray fb, jintArray src_list, jintArray dst_list, jint jn)
 {
@@ -545,10 +550,8 @@ JNIEXPORT void JNICALL Java_gpu_GPUmm_connect(JNIEnv *env, jclass cls,
                            CUBLAS_GEMM_DEFAULT));
 
   CUDA_CALL(cudaThreadSynchronize());
-
   CUDA_CALL(cudaMemcpy(cpu_matrix, gpu_m, n*n*sizeof(float), cudaMemcpyDeviceToHost));
   regulateCPU(cpu_matrix, n*n);
-
   env->ReleasePrimitiveArrayCritical(fb, cpu_matrix, 0);
 
   CUDA_CALL(cudaFree(gpu_src_matrix));
@@ -556,9 +559,6 @@ JNIEXPORT void JNICALL Java_gpu_GPUmm_connect(JNIEnv *env, jclass cls,
   free(cpu_src_matrix);
   free(cpu_dst_matrix);
 }
-
-
-void dumpPartM(float* a, int printn, int n);
 
 int
 power(float *cpu_m, int n, bool fresh) {
@@ -580,7 +580,6 @@ power(float *cpu_m, int n, bool fresh) {
   int dense_m = 1;
   bool used_sparse = false;
   while(fresh && staySparse(n, nnz)) {
-    // 【修正済】呼び出す関数が新しいsparseSparseMMに置き換わった
     nnz = sparseSparseMM(handle_ss, descr,
                          gpu_csr_val, gpu_csr_rowptr, gpu_csr_colind, nnz, n);
     regulate(gpu_csr_val, nnz, cpu_m);
@@ -611,7 +610,8 @@ power(float *cpu_m, int n, bool fresh) {
 #endif
     dense_m *= 2;
     regulate(gpu_dst, n*n, cpu_m);
-    if(earlyTermination(gpu_src, gpu_dst, n*n)) {
+    // 【修正済】`n`を渡すように修正
+    if(earlyTermination(gpu_src, gpu_dst, n, n*n)) {
       cout << "Early termination, dense_m=" << dense_m << ", n=" << n << "\n";
       break;
     }
