@@ -21,7 +21,7 @@
 using namespace std;
 
 // ====== Optimiations ====
-#define REGULATE_GPU   // ON
+#define REGULATE_GPU  // ON
 //#define OPT_TRIANGULAR_MM      // OFF
 #define OPT_SPARSE_MATRIX        // OFF
 #define OPT_EARLY_TERMINATION  // ON
@@ -32,6 +32,7 @@ using namespace std;
 #define REGULATE_BATCH 1000
 
 #define MAX_N 30000ul
+//#define MAX_N 16384ul
 #define MAX_NNZ ((MAX_N) * 20)
 
 // sparse matrix optimization
@@ -46,10 +47,14 @@ using namespace std;
 // early termination optimization
 #define MAGIC_EARLY_TERMINATION_THRESHOLD 256
 
+
+
+
+
 const float alpha = 1.0;
 const float beta = 0.0;
 
-// グローバル変数
+// TODO: check which API needs sync
 float *gpu_m, *gpu_m2, *gpu_csr_val;
 int *gpu_nnz_row, *gpu_csr_rowptr, *gpu_csr_colind;
 
@@ -113,16 +118,15 @@ staySparse(int n, int nnz) {
   }
 }
 
-// 【修正済】cusparseNnzが削除されたため、NNZを数えるカスタムカーネルを実装
+//original kernel
 __global__ void countNNZ_kernel(const float* mat, int size, int* nnz_counter) {
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += blockDim.x * gridDim.x) {
-        if (mat[i] != 0.0f) {
-            atomicAdd(nnz_counter, 1);
-        }
-    }
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += blockDim.x * gridDim.x) {
+      if (mat[i] != 0.0f) {
+          atomicAdd(nnz_counter, 1);
+      }
+  }
 }
 
-// 【修正済】カスタムカーネルを呼び出すようにcountNNZを書き換え
 void
 countNNZ(cusparseHandle_t handle, cusparseMatDescr_t descr,
          int* nnzrow_unused, int &nnz_total, float* gpu_m, int n) {
@@ -130,9 +134,8 @@ countNNZ(cusparseHandle_t handle, cusparseMatDescr_t descr,
     CUDA_CALL(cudaMalloc(&d_nnz_total, sizeof(int)));
     CUDA_CALL(cudaMemset(d_nnz_total, 0, sizeof(int)));
 
-    // カーネルを起動してNNZをカウント
-    // Note: nnzrow (各行のNNZ) はこの実装では計算しません。
-    // 後続の `cudaDense2sparse` では使われないため問題ありません。
+    //use original kernel
+    //nnzrow is unused, so it may be deleted
     countNNZ_kernel<<<256, 256>>>(gpu_m, n * n, d_nnz_total);
 
     CUDA_CALL(cudaMemcpy(&nnz_total, d_nnz_total, sizeof(int), cudaMemcpyDeviceToHost));
@@ -141,40 +144,41 @@ countNNZ(cusparseHandle_t handle, cusparseMatDescr_t descr,
     cout << "  count nnz [nnz_total=" << nnz_total << "]\n";
 }
 
+//countResultNNZ has been deleted
 
-// 【修正済】cusparseSdense2csrからcusparseDenseToSparseワークフローへ変更
+//cusparseSdense2csr->cusparseDenseToSparse
 void
 cudaDense2sparse(cusparseHandle_t handle, cusparseMatDescr_t descr,
-                 float* gpu_m, int *nnz_row_unused,
-                 float* &csr_val, int* &csr_rowptr, int* &csr_colind,
-                 int nnz_total, int n) {
-    cusparseDnMatDescr_t mat_dense;
-    cusparseSpMatDescr_t mat_sparse;
-    cusparseIndexBase_t indexBase = cusparseGetMatIndexBase(descr);
+  float* gpu_m, int *nnz_row_unused,
+  float* &csr_val, int* &csr_rowptr, int* &csr_colind,
+  int nnz_total, int n) {
+cusparseDnMatDescr_t mat_dense;
+cusparseSpMatDescr_t mat_sparse;
+cusparseIndexBase_t indexBase = cusparseGetMatIndexBase(descr);
 
-    CUSPARSE_CALL(cusparseCreateDnMat(&mat_dense, n, n, n, gpu_m, CUDA_R_32F, CUSPARSE_ORDER_COL));
-    CUSPARSE_CALL(cusparseCreateCsr(&mat_sparse, n, n, nnz_total,
-                                    csr_rowptr, csr_colind, csr_val,
-                                    CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                                    indexBase, CUDA_R_32F));
-    size_t bufferSize = 0;
-    void* dBuffer    = NULL;
-    CUSPARSE_CALL(cusparseDenseToSparse_bufferSize(handle, mat_dense, mat_sparse,
-                                                   CUSPARSE_DENSETOSPARSE_ALG_DEFAULT, &bufferSize));
-    if (bufferSize > 0) { CUDA_CALL(cudaMalloc(&dBuffer, bufferSize)); }
+CUSPARSE_CALL(cusparseCreateDnMat(&mat_dense, n, n, n, gpu_m, CUDA_R_32F, CUSPARSE_ORDER_COL));
+CUSPARSE_CALL(cusparseCreateCsr(&mat_sparse, n, n, nnz_total,
+                     csr_rowptr, csr_colind, csr_val,
+                     CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                     indexBase, CUDA_R_32F));
+size_t bufferSize = 0;
+void* dBuffer    = NULL;
+CUSPARSE_CALL(cusparseDenseToSparse_bufferSize(handle, mat_dense, mat_sparse,
+                                    CUSPARSE_DENSETOSPARSE_ALG_DEFAULT, &bufferSize));
+if (bufferSize > 0) { CUDA_CALL(cudaMalloc(&dBuffer, bufferSize)); }
 
-    CUSPARSE_CALL(cusparseDenseToSparse_convert(handle, mat_dense, mat_sparse,
-                                                CUSPARSE_DENSETOSPARSE_ALG_DEFAULT, dBuffer));
+CUSPARSE_CALL(cusparseDenseToSparse_convert(handle, mat_dense, mat_sparse,
+                                 CUSPARSE_DENSETOSPARSE_ALG_DEFAULT, dBuffer));
 
-    if (bufferSize > 0) { CUDA_CALL(cudaFree(dBuffer)); }
-    CUSPARSE_CALL(cusparseDestroyDnMat(mat_dense));
-    CUSPARSE_CALL(cusparseDestroySpMat(mat_sparse));
+if (bufferSize > 0) { CUDA_CALL(cudaFree(dBuffer)); }
+CUSPARSE_CALL(cusparseDestroyDnMat(mat_dense));
+CUSPARSE_CALL(cusparseDestroySpMat(mat_sparse));
 
-    CUDA_CALL(cudaThreadSynchronize());
-    cout << "  [GPU] dense matrix => sparse matrix \n";
+CUDA_CALL(cudaThreadSynchronize());
+cout << "  [GPU] dense matrix => sparse matrix \n";
 }
 
-// 【修正済】cusparseScsr2denseからcusparseSparseToDenseワークフローへ変更
+//cusparseScsr2dense->cusparseSparseToDense
 void
 sparse2dense(cusparseHandle_t handle, cusparseMatDescr_t descr,
              float* csr_val, int* csr_rowptr, int* csr_colind,
@@ -212,7 +216,7 @@ sparse2dense(cusparseHandle_t handle, cusparseMatDescr_t descr,
     cout << "  [GPU] sparse matrix => dense matrix \n";
 }
 
-// 【修正済】cublasSgemmからcublasGemmExへ変更
+//cublasSgemm->cublasGemmEx
 void
 denseSgemm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
     cudaDataType Atype = CUDA_R_32F;
@@ -234,12 +238,12 @@ denseSgemm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
     cout<< "  [GPU] dense gemm\n";
 }
 
-// 【修正済】不正なcublasStrmm呼び出しを、より明確なcublasTrmmExによるin-place操作に修正
+//cublasStrmm->cublasTrmmEx
 void
 denseStrmm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
     CUDA_CALL(cudaMemcpy(gpu_dst, gpu_src, sizeof(float) * n * n, cudaMemcpyDeviceToDevice));
     
-    // cublasTrmmExはin-placeで動作する (B := alpha*A*B)
+    // cublasTrmmEx:in-place(B := alpha*A*B)
     CUBLAS_CALL(cublasTrmmEx(handle,
                              CUBLAS_SIDE_LEFT,
                              CUBLAS_FILL_MODE_UPPER,
@@ -248,7 +252,7 @@ denseStrmm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
                              n, n,
                              &alpha,
                              gpu_src, CUDA_R_32F, n, // A
-                             gpu_dst, CUDA_R_32F, n  // B (in-out)
+                             gpu_dst, CUDA_R_32F, n  // B(in-out)
                              ));
 
     CUDA_CALL(cudaThreadSynchronize());
@@ -256,7 +260,6 @@ denseStrmm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
 }
 
 
-// 【修正済】SpGEMMワークフロー全体を、CUDA 12.2のAPIシグネチャに合わせて書き換え
 int
 sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
                float* &csr_val, int* &csr_rowptr, int* &csr_colind,
@@ -299,7 +302,7 @@ sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
     int* csr_colind_C;
     float* csr_val_C;
     
-    // 【修正済】cusparseSpMatGetAttributeからcusparseCsrGetに変更
+    //cusparseSpMatGetAttribute->cusparseCsrGet
     CUSPARSE_CALL(cusparseCsrGet(matC, NULL, NULL, &nnz_C, 
                                  (void**)&csr_rowptr_C, NULL, NULL, NULL, NULL, NULL, NULL));
 
@@ -336,19 +339,23 @@ sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
     return (int)nnz_C;
 }
 
+
 int
 dense2sparse(cusparseHandle_t handle, cusparseMatDescr_t descr,
   int *nnz_row, float *dense_m,
   float *csr_val, int *csr_rowptr, int *csr_colind,
   int n) {
   int nnz_total;
+  // count number of non-zero element
   countNNZ(handle, descr, nnz_row, nnz_total, dense_m, n);
   if (nnz_total > MAX_NNZ) {
     cout << "[INFO] too many non-zeros(" << nnz_total << "), maximum " << MAX_NNZ << "\n";
     cout << "[INFO] stop using sparse\n";
+    //assert(false);
   } else {
-    cudaDense2sparse(handle, descr, dense_m, nnz_row, csr_val,
-      csr_rowptr, csr_colind, nnz_total, n);
+    // init the sparse matrix
+  cudaDense2sparse(handle, descr, dense_m, nnz_row, csr_val,
+        csr_rowptr, csr_colind, nnz_total, n);
     cout << "[INFO] matrix is sparse, using sparse\n";
   }
   return nnz_total;
@@ -363,6 +370,7 @@ void regulateCPU(float* a, int size) {
 __global__
 void regulateGPU(float *a, int length) {
   int index = (threadIdx.x + blockIdx.x * blockDim.x) * REGULATE_BATCH;
+  //printf("block %d, thread %d, index[%d] => [%f]\n", blockIdx.x, threadIdx.x, index, a[index]);
   for (int i=0; i<REGULATE_BATCH; i++) {
     if (index+i < length) {
       a[index + i] = 2 * (a[index + i] != 0);
@@ -387,6 +395,7 @@ void regulate(float *gpu_m, int length, float *cpu_m) {
 #endif
 }
 
+
 __device__ int matrix_diff;
 
 __global__
@@ -400,45 +409,47 @@ void compareGPU(float *gpu_m_1, float *gpu_m_2, int length) {
   for (int i=0; i<REGULATE_BATCH; i++) {
     if (index+i < length) {
       if ( (gpu_m_1[index + i] != 0) != (gpu_m_2[index + i] != 0) ) {
-        atomicOr(&matrix_diff, 1);
+        matrix_diff = 1;
       }
     }
   }
 }
 
-// 【修正済】`n`を引数で受け取り、ロジックを修正
 bool earlyTermination(float *gpu_m_1, float *gpu_m_2, int n, int length) {
-#ifdef OPT_EARLY_TERMINATION
-    if (n < MAGIC_EARLY_TERMINATION_THRESHOLD) {
-        return false;
-    }
-
-    initEarlyTermination<<<1,1>>>();
-    auto e = cudaGetLastError();
-    if (cudaSuccess != e) {
-        cout << "CUDA: " << cudaGetErrorString(e) << endl;
-        assert(false);
-    }
-
-    int num_blocks = ceil((double)length/THREADS_PER_BLOCK/REGULATE_BATCH);
-    compareGPU<<<num_blocks, THREADS_PER_BLOCK>>>(gpu_m_1, gpu_m_2, length);
-    e = cudaGetLastError();
-    if (cudaSuccess != e) {
-        cout << "CUDA: " << cudaGetErrorString(e) << endl;
-        assert(false);
-    }
-    CUDA_CALL(cudaThreadSynchronize());
-
-    int diff_h;
-    CUDA_CALL(cudaMemcpyFromSymbol(&diff_h, matrix_diff, sizeof(int), 0, cudaMemcpyDeviceToHost));
-    
-    return diff_h == 0;
-#else
-    return false;
-#endif
+  #ifdef OPT_EARLY_TERMINATION
+      if (n < MAGIC_EARLY_TERMINATION_THRESHOLD) {
+          return false;
+      }
+  
+      initEarlyTermination<<<1,1>>>();
+      auto e = cudaGetLastError();
+      if (cudaSuccess != e) {
+          cout << "CUDA: " << cudaGetErrorString(e) << endl;
+          assert(false);
+      }
+  
+      int num_blocks = ceil((double)length/THREADS_PER_BLOCK/REGULATE_BATCH);
+      compareGPU<<<num_blocks, THREADS_PER_BLOCK>>>(gpu_m_1, gpu_m_2, length);
+      e = cudaGetLastError();
+      if (cudaSuccess != e) {
+          cout << "CUDA: " << cudaGetErrorString(e) << endl;
+          assert(false);
+      }
+      CUDA_CALL(cudaThreadSynchronize());
+  
+      int diff_h;
+      CUDA_CALL(cudaMemcpyFromSymbol(&diff_h, matrix_diff, sizeof(int), 0, cudaMemcpyDeviceToHost));
+      
+      return diff_h == 0;
+  #else
+      return false;
+  #endif
 }
 
+
+
 void swapSrcDst(float *&gpu_src, float *&gpu_dst) {
+  // swap
   float *tmp = gpu_src;
   gpu_src = gpu_dst;
   gpu_dst = tmp;
@@ -450,20 +461,23 @@ JNIEXPORT void JNICALL Java_gpu_GPUmm_init(JNIEnv *env, jclass cls) {
   int n = MAX_N;
   int nnz_total = MAX_NNZ;
 
+  // (1) allocate and initialize GPU matrix memory
   CUBLAS_CALL(cublasCreate(&handle_c));
   CUDA_CALL(cudaMalloc(&gpu_m, n*n*sizeof(float)));
   CUDA_CALL(cudaMalloc(&gpu_m2, n*n*sizeof(float)));
 
+  // (2) decide whether use sparse matrix
+  //     if so, allocate sparse matrix memory
   CUSPARSE_CALL(cusparseCreate(&handle_s));
   CUSPARSE_CALL(cusparseCreate(&handle_ss));
   CUSPARSE_CALL(cusparseSetPointerMode(handle_ss, CUSPARSE_POINTER_MODE_HOST));
   CUSPARSE_CALL(cusparseCreateMatDescr(&descr));
   CUSPARSE_CALL(cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO));
-  
+
   CUDA_CALL(cudaMalloc(&gpu_nnz_row, sizeof(int) * n));
-  CUDA_CALL(cudaMalloc(&gpu_csr_val, sizeof(float) * nnz_total));
-  CUDA_CALL(cudaMalloc(&gpu_csr_rowptr, sizeof(int) * (n+1)));
-  CUDA_CALL(cudaMalloc(&gpu_csr_colind, sizeof(int) * nnz_total));
+  CUDA_CALL(cudaMalloc(&gpu_csr_val, sizeof(float) * nnz_total)  );
+  CUDA_CALL(cudaMalloc(&gpu_csr_rowptr, sizeof(int) * (n+1) ) ) ;
+  CUDA_CALL(cudaMalloc(&gpu_csr_colind, sizeof(int) * nnz_total) ) ;
 }
 
 JNIEXPORT void JNICALL Java_gpu_GPUmm_destroy(JNIEnv *env, jclass cls) {
@@ -480,85 +494,93 @@ JNIEXPORT void JNICALL Java_gpu_GPUmm_destroy(JNIEnv *env, jclass cls) {
   CUDA_CALL(cudaFree(gpu_csr_colind));
 }
 
+
+void dumpM(float* a, int n);
+/*
+ * Connect src_list -> dst_list and update the reachability matrix
+ */
 JNIEXPORT void JNICALL Java_gpu_GPUmm_connect(JNIEnv *env, jclass cls,
-    jfloatArray fb, jintArray src_list, jintArray dst_list, jint jn)
+  jfloatArray fb, jintArray src_list, jintArray dst_list, jint jn)
 {
-  int n = (int) jn;
-  int len = (int) env->GetArrayLength(src_list);
-  int m_size = sizeof(float) * n * len;
-  int src_inds[len], dst_inds[len];
+int n = (int) jn;
+int len = (int) env->GetArrayLength(src_list);
+int m_size = sizeof(float) * n * len;
+int src_inds[len], dst_inds[len];
 
-  jint *jsrc_inds = env->GetIntArrayElements(src_list, 0);
-  jint *jdst_inds = env->GetIntArrayElements(dst_list, 0);
-  for (int i=0; i<len; i++) {
-    src_inds[i] = jsrc_inds[i];
-    dst_inds[i] = jdst_inds[i];
-  }
-
-  float *cpu_src_matrix, *cpu_dst_matrix, *gpu_src_matrix, *gpu_dst_matrix;
-  cpu_src_matrix = (float*) malloc(m_size);
-  cpu_dst_matrix = (float*) malloc(m_size);
-  CUDA_CALL(cudaMalloc(&gpu_src_matrix, m_size));
-  CUDA_CALL(cudaMalloc(&gpu_dst_matrix, m_size));
-
-  float *cpu_matrix = (float*) env->GetPrimitiveArrayCritical(fb, 0);
-  if (cpu_matrix == NULL) {
-    cout << "cpu_matrix is NULL!!!\n";
-    return;
-  }
-
-  for (int i=0; i<len; i++) {
-    int src = src_inds[i];
-    int dst = dst_inds[i];
-    cpu_matrix[dst*n + src] = 1;
-    for (int j=0; j<n; j++) {
-      if (cpu_matrix[j*n + dst] != 0) {
-        cpu_matrix[j*n + src] = 1;
-      }
-      if (cpu_matrix[src*n + j] != 0) {
-        cpu_matrix[dst*n + j] = 1;
-      }
-    }
-  }
-
-  for (int i=0; i<len; i++) {
-    int src = src_inds[i];
-    int dst = dst_inds[i];
-    for (int j=0; j<n; j++) {
-      cpu_src_matrix[i*n + j] = cpu_matrix[src*n + j];
-    }
-    for (int j=0; j<n; j++) {
-      cpu_dst_matrix[j*len + i] = cpu_matrix[j*n + dst];
-    }
-  }
-
-  CUDA_CALL(cudaMemcpy(gpu_src_matrix, cpu_src_matrix, m_size, cudaMemcpyHostToDevice));
-  CUDA_CALL(cudaMemcpy(gpu_dst_matrix, cpu_dst_matrix, m_size, cudaMemcpyHostToDevice));
-  CUDA_CALL(cudaMemcpy(gpu_m, cpu_matrix, n*n*sizeof(float), cudaMemcpyHostToDevice));
-
-  const float m_beta = 1.0;
-  
-  CUBLAS_CALL(cublasGemmEx(handle_c,
-                           CUBLAS_OP_N, CUBLAS_OP_N,
-                           n, n, len,
-                           &alpha,
-                           gpu_src_matrix, CUDA_R_32F, n,
-                           gpu_dst_matrix, CUDA_R_32F, len,
-                           &m_beta,
-                           gpu_m,          CUDA_R_32F, n,
-                           CUBLAS_COMPUTE_32F,
-                           CUBLAS_GEMM_DEFAULT));
-
-  CUDA_CALL(cudaThreadSynchronize());
-  CUDA_CALL(cudaMemcpy(cpu_matrix, gpu_m, n*n*sizeof(float), cudaMemcpyDeviceToHost));
-  regulateCPU(cpu_matrix, n*n);
-  env->ReleasePrimitiveArrayCritical(fb, cpu_matrix, 0);
-
-  CUDA_CALL(cudaFree(gpu_src_matrix));
-  CUDA_CALL(cudaFree(gpu_dst_matrix));
-  free(cpu_src_matrix);
-  free(cpu_dst_matrix);
+jint *jsrc_inds = env->GetIntArrayElements(src_list, 0);
+jint *jdst_inds = env->GetIntArrayElements(dst_list, 0);
+for (int i=0; i<len; i++) {
+  src_inds[i] = jsrc_inds[i];
+  dst_inds[i] = jdst_inds[i];
 }
+
+float *cpu_src_matrix, *cpu_dst_matrix, *gpu_src_matrix, *gpu_dst_matrix;
+cpu_src_matrix = (float*) malloc(m_size);
+cpu_dst_matrix = (float*) malloc(m_size);
+CUDA_CALL(cudaMalloc(&gpu_src_matrix, m_size));
+CUDA_CALL(cudaMalloc(&gpu_dst_matrix, m_size));
+
+float *cpu_matrix = (float*) env->GetPrimitiveArrayCritical(fb, 0);
+if (cpu_matrix == NULL) {
+  cout << "cpu_matrix is NULL!!!\n";
+  return;
+}
+
+for (int i=0; i<len; i++) {
+  int src = src_inds[i];
+  int dst = dst_inds[i];
+  cpu_matrix[dst*n + src] = 1;
+  for (int j=0; j<n; j++) {
+    if (cpu_matrix[j*n + dst] != 0) {
+      cpu_matrix[j*n + src] = 1;
+    }
+    if (cpu_matrix[src*n + j] != 0) {
+      cpu_matrix[dst*n + j] = 1;
+    }
+  }
+}
+
+for (int i=0; i<len; i++) {
+  int src = src_inds[i];
+  int dst = dst_inds[i];
+  for (int j=0; j<n; j++) {
+    cpu_src_matrix[i*n + j] = cpu_matrix[src*n + j];
+  }
+  for (int j=0; j<n; j++) {
+    cpu_dst_matrix[j*len + i] = cpu_matrix[j*n + dst];
+  }
+}
+
+CUDA_CALL(cudaMemcpy(gpu_src_matrix, cpu_src_matrix, m_size, cudaMemcpyHostToDevice));
+CUDA_CALL(cudaMemcpy(gpu_dst_matrix, cpu_dst_matrix, m_size, cudaMemcpyHostToDevice));
+CUDA_CALL(cudaMemcpy(gpu_m, cpu_matrix, n*n*sizeof(float), cudaMemcpyHostToDevice));
+
+const float m_beta = 1.0;
+
+CUBLAS_CALL(cublasGemmEx(handle_c,
+                         CUBLAS_OP_N, CUBLAS_OP_N,
+                         n, n, len,
+                         &alpha,
+                         gpu_src_matrix, CUDA_R_32F, n,
+                         gpu_dst_matrix, CUDA_R_32F, len,
+                         &m_beta,
+                         gpu_m,          CUDA_R_32F, n,
+                         CUBLAS_COMPUTE_32F,
+                         CUBLAS_GEMM_DEFAULT));
+
+CUDA_CALL(cudaThreadSynchronize());
+CUDA_CALL(cudaMemcpy(cpu_matrix, gpu_m, n*n*sizeof(float), cudaMemcpyDeviceToHost));
+regulateCPU(cpu_matrix, n*n);
+env->ReleasePrimitiveArrayCritical(fb, cpu_matrix, 0);
+
+CUDA_CALL(cudaFree(gpu_src_matrix));
+CUDA_CALL(cudaFree(gpu_dst_matrix));
+free(cpu_src_matrix);
+free(cpu_dst_matrix);
+}
+
+
+void dumpPartM(float* a, int printn, int n);
 
 int
 power(float *cpu_m, int n, bool fresh) {
@@ -627,17 +649,38 @@ power(float *cpu_m, int n, bool fresh) {
   return 0;
 }
 
+
+
 JNIEXPORT void JNICALL Java_gpu_GPUmm_power (JNIEnv *env, jclass cls, jfloatArray jarr, jint jn, jboolean jfresh) {
   int n = (int) jn;
   bool fresh = (bool) jfresh;
   float *matrix = (float*) env->GetPrimitiveArrayCritical(jarr, 0);
+  //float *matrix = (float*) env->GetFloatArrayElements(jarr, 0);
   if (matrix == NULL) {
     cout << "NULL!!!\n";
     return;
   }
+
   power(matrix, n, fresh);
+
+  /*
+  // debug code
+  ofstream outf;
+  outf.open("/tmp/mmresult");
+  for(int i=0; i<n*n; i++) {
+    if (matrix[i] != 0) {
+      outf << "1";
+    } else {
+      outf << "0";
+    }
+  }
+  outf.close();
+  */
+
   env->ReleasePrimitiveArrayCritical(jarr, matrix, 0);
+  //env->ReleaseFloatArrayElements(jarr, matrix, 0);
 }
+
 
 int
 selfmm(float *cpu_m, int n) {
@@ -667,15 +710,20 @@ selfmm(float *cpu_m, int n) {
   return 0;
 }
 
+
 JNIEXPORT void JNICALL Java_gpu_GPUmm_selfmm(JNIEnv *env, jclass cls, jfloatArray jarr, jint jn) {
   int n = (int) jn;
   float *matrix = (float*) env->GetPrimitiveArrayCritical(jarr, 0);
+  //float *matrix = (float*) env->GetFloatArrayElements(jarr, 0);
   if (matrix == NULL) {
     cout << "NULL!!!\n";
     return;
   }
+
   selfmm(matrix, n);
+
   env->ReleasePrimitiveArrayCritical(jarr, matrix, 0);
+  //env->ReleaseFloatArrayElements(jarr, matrix, 0);
 }
 
 void dumpM(float* a, int n) {
