@@ -141,7 +141,7 @@ countNNZ(cusparseHandle_t handle, cusparseMatDescr_t descr,
 
     CUDA_CALL(cudaMemcpy(&nnz_total, d_nnz_total, sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CALL(cudaFree(d_nnz_total));
-    CUDA_CALL(cudaThreadSynchronize());
+    CUDA_CALL(cudaDeviceSynchronize());
     cout << "  count nnz [nnz_total=" << nnz_total << "]\n";
 }
 
@@ -175,7 +175,7 @@ if (bufferSize > 0) { CUDA_CALL(cudaFree(dBuffer)); }
 CUSPARSE_CALL(cusparseDestroyDnMat(mat_dense));
 CUSPARSE_CALL(cusparseDestroySpMat(mat_sparse));
 
-CUDA_CALL(cudaThreadSynchronize());
+CUDA_CALL(cudaDeviceSynchronize());
 cout << "  [GPU] dense matrix => sparse matrix \n";
 }
 
@@ -213,7 +213,7 @@ sparse2dense(cusparseHandle_t handle, cusparseMatDescr_t descr,
     CUSPARSE_CALL(cusparseDestroySpMat(mat_sparse));
     CUSPARSE_CALL(cusparseDestroyDnMat(mat_dense));
 
-    CUDA_CALL(cudaThreadSynchronize());
+    CUDA_CALL(cudaDeviceSynchronize());
     cout << "  [GPU] sparse matrix => dense matrix \n";
 }
 
@@ -235,7 +235,7 @@ denseSgemm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
                              gpu_dst, Ctype, n,
                              computeType,
                              CUBLAS_GEMM_DEFAULT));
-    CUDA_CALL(cudaThreadSynchronize());
+    CUDA_CALL(cudaDeviceSynchronize());
     cout<< "  [GPU] dense gemm\n";
 }
 
@@ -252,7 +252,7 @@ denseStrmm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
       gpu_src, n,
       gpu_src, n,
       gpu_dst, n));
-  CUDA_CALL(cudaThreadSynchronize());
+  CUDA_CALL(cudaDeviceSynchronize());
   cout<< "  [GPU] dense trmm\n";
 }
 
@@ -385,7 +385,7 @@ void regulate(float *gpu_m, int length, float *cpu_m) {
     cout << "CUDA: " << cudaGetErrorString(e) << endl;
     assert(false);
   }
-  CUDA_CALL(cudaThreadSynchronize());
+  CUDA_CALL(cudaDeviceSynchronize());
 #else
   CUDA_CALL(cudaMemcpy(cpu_m, gpu_m, length*sizeof(float), cudaMemcpyDeviceToHost));
   regulateCPU(cpu_m, length);
@@ -433,7 +433,7 @@ bool earlyTermination(float *gpu_m_1, float *gpu_m_2, int n, int length) {
           cout << "CUDA: " << cudaGetErrorString(e) << endl;
           assert(false);
       }
-      CUDA_CALL(cudaThreadSynchronize());
+      CUDA_CALL(cudaDeviceSynchronize());
   
       int diff_h;
       CUDA_CALL(cudaMemcpyFromSymbol(&diff_h, matrix_diff, sizeof(int), 0, cudaMemcpyDeviceToHost));
@@ -566,7 +566,7 @@ CUBLAS_CALL(cublasGemmEx(handle_c,
                          CUBLAS_COMPUTE_32F,
                          CUBLAS_GEMM_DEFAULT));
 
-CUDA_CALL(cudaThreadSynchronize());
+CUDA_CALL(cudaDeviceSynchronize());
 CUDA_CALL(cudaMemcpy(cpu_matrix, gpu_m, n*n*sizeof(float), cudaMemcpyDeviceToHost));
 regulateCPU(cpu_matrix, n*n);
 env->ReleasePrimitiveArrayCritical(fb, cpu_matrix, 0);
