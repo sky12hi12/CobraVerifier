@@ -306,8 +306,8 @@ sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
                                  (void**)&csr_colind_C,
                                  (void**)&csr_val_C, NULL, NULL, NULL, NULL));
 
-    CUDA_CALL(cudaMalloc(&csr_colind_C, sizeof(int)   * nnz_C));
-    CUDA_CALL(cudaMalloc(&csr_val_C,    sizeof(float) * nnz_C));
+    //CUDA_CALL(cudaMalloc(&csr_colind_C, sizeof(int)   * nnz_C));
+    //CUDA_CALL(cudaMalloc(&csr_val_C,    sizeof(float) * nnz_C));
     CUSPARSE_CALL(cusparseCsrSetPointers(matC, csr_rowptr_C, csr_colind_C, csr_val_C));
     
     // SpGEMM Phase 2: Compute
