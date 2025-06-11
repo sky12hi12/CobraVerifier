@@ -295,12 +295,13 @@ sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
                                                 CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize1, dBuffer1));
 
     int64_t nnz_C;
+    int64_t rows_C, cols_C;
     int* csr_rowptr_C;
     int* csr_colind_C;
     float* csr_val_C;
     
     //cusparseSpMatGetAttribute->cusparseCsrGet
-    CUSPARSE_CALL(cusparseCsrGet(matC, NULL, NULL, &nnz_C, 
+    CUSPARSE_CALL(cusparseCsrGet(matC, &rows_C, &cols_C &nnz_C, 
                                  (void**)&csr_rowptr_C, NULL, NULL, NULL, NULL, NULL, NULL));
 
     CUDA_CALL(cudaMalloc(&csr_colind_C, sizeof(int)   * nnz_C));
