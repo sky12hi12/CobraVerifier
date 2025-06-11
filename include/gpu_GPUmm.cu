@@ -17,6 +17,7 @@
 #include <string>
 #include <cstdlib>
 #include <cmath>
+#include <cstdint>
 
 using namespace std;
 
@@ -238,25 +239,21 @@ denseSgemm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
     cout<< "  [GPU] dense gemm\n";
 }
 
-//cublasStrmm->cublasTrmmEx
 void
 denseStrmm(cublasHandle_t handle, float *gpu_src, float *gpu_dst, int n) {
-    CUDA_CALL(cudaMemcpy(gpu_dst, gpu_src, sizeof(float) * n * n, cudaMemcpyDeviceToDevice));
-    
-    // cublasTrmmEx:in-place(B := alpha*A*B)
-    CUBLAS_CALL(cublasTrmmEx(handle,
-                             CUBLAS_SIDE_LEFT,
-                             CUBLAS_FILL_MODE_UPPER,
-                             CUBLAS_OP_N,
-                             CUBLAS_DIAG_UNIT,
-                             n, n,
-                             &alpha,
-                             gpu_src, CUDA_R_32F, n, // A
-                             gpu_dst, CUDA_R_32F, n  // B(in-out)
-                             ));
-
-    CUDA_CALL(cudaThreadSynchronize());
-    cout<< "  [GPU] dense trmm\n";
+  CUBLAS_CALL(cublasStrmm(
+      handle,
+      CUBLAS_SIDE_LEFT,
+      CUBLAS_FILL_MODE_UPPER,
+      CUBLAS_OP_N,
+      CUBLAS_DIAG_UNIT,
+      n, n,
+      &alpha,
+      gpu_src, n,
+      gpu_src, n,
+      gpu_dst, n));
+  CUDA_CALL(cudaThreadSynchronize());
+  cout<< "  [GPU] dense trmm\n";
 }
 
 
@@ -297,7 +294,7 @@ sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
                                                 &spgemm_alpha, matA, matB, &spgemm_beta, matC, computeType, 
                                                 CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize1, dBuffer1));
 
-    long long nnz_C;
+    int64_t nnz_C;
     int* csr_rowptr_C;
     int* csr_colind_C;
     float* csr_val_C;
