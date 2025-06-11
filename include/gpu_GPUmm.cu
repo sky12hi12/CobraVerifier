@@ -301,7 +301,7 @@ sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
     float* csr_val_C;
     
     //cusparseSpMatGetAttribute->cusparseCsrGet
-    CUSPARSE_CALL(cusparseCsrGet(matC, &rows_C, &cols_C &nnz_C, 
+    CUSPARSE_CALL(cusparseCsrGet(matC, &rows_C, &cols_C, &nnz_C, 
                                  (void**)&csr_rowptr_C, NULL, NULL, NULL, NULL, NULL, NULL));
 
     CUDA_CALL(cudaMalloc(&csr_colind_C, sizeof(int)   * nnz_C));
