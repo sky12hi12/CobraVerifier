@@ -607,10 +607,17 @@ power(float *cpu_m, int n, bool fresh) {
 
   timeval start, end;
   gettimeofday(&start, 0);
+  int prev_nnz = -1;
 
   int dense_m = 1;
   bool used_sparse = false;
   while(fresh && staySparse(n, nnz)) {
+    if (nnz == prev_nnz) {
+      cout << "[INFO] Sparse matrix reached a fixed point. Exiting loop." << endl;
+      break;
+    }
+    prev_nnz = nnz;
+
     nnz = sparseSparseMM(handle_ss, descr,
                          gpu_csr_val, gpu_csr_rowptr, gpu_csr_colind, nnz, n);
     regulate(gpu_csr_val, nnz, cpu_m);
