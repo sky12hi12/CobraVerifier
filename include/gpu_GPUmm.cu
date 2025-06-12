@@ -386,6 +386,9 @@ void regulateGPU(float *a, int length) {
 
 void regulate(float *gpu_m, int length, float *cpu_m) {
 #ifdef REGULATE_GPU
+  if (length == 0) {
+    return;
+  }
   int num_blocks = ceil((double)length/THREADS_PER_BLOCK/REGULATE_BATCH);
   regulateGPU<<<num_blocks, THREADS_PER_BLOCK>>>(gpu_m, length);
   auto e = cudaGetLastError();
