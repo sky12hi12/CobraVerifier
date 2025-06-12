@@ -299,12 +299,17 @@ sparseSparseMM(cusparseHandle_t handle, cusparseMatDescr_t descr_old,
     int* csr_rowptr_C;
     int* csr_colind_C;
     float* csr_val_C;
+
+    cusparseIndexType_t rowOffsetsType;
+    cusparseIndexType_t colIndType;
+    cusparseIndexBase_t idxBase;
+    cudaDataType        valueType;
     
     //cusparseSpMatGetAttribute->cusparseCsrGet
     CUSPARSE_CALL(cusparseCsrGet(matC, &rows_C, &cols_C, &nnz_C, 
                                  (void**)&csr_rowptr_C,
                                  (void**)&csr_colind_C,
-                                 (void**)&csr_val_C, NULL, NULL, NULL, NULL));
+                                 (void**)&csr_val_C, rowOffsetsType, colIndType, idxBase, valueType));
 
     //CUDA_CALL(cudaMalloc(&csr_colind_C, sizeof(int)   * nnz_C));
     //CUDA_CALL(cudaMalloc(&csr_val_C,    sizeof(float) * nnz_C));
