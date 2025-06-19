@@ -578,7 +578,7 @@ CUBLAS_CALL(cublasGemmEx(handle_c,
                          CUBLAS_GEMM_DEFAULT));
 
 CUDA_CALL(cudaDeviceSynchronize());
-CUDA_CALL(cudaMemcpy(cpu_matrix, gpu_m, n*n*sizeof(float), cudaMemcpyDeviceToHost));
+CUDA_CALL(cudaMemcpy(cpu_matrix, gpu_src, n*n*sizeof(float), cudaMemcpyDeviceToHost));
 regulateCPU(cpu_matrix, n*n);
 env->ReleasePrimitiveArrayCritical(fb, cpu_matrix, 0);
 
