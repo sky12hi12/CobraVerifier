@@ -578,7 +578,7 @@ CUBLAS_CALL(cublasGemmEx(handle_c,
                          CUBLAS_GEMM_DEFAULT));
 
 CUDA_CALL(cudaDeviceSynchronize());
-CUDA_CALL(cudaMemcpy(cpu_matrix, gpu_src, n*n*sizeof(float), cudaMemcpyDeviceToHost));
+CUDA_CALL(cudaMemcpy(cpu_matrix, gpu_m, n*n*sizeof(float), cudaMemcpyDeviceToHost));
 regulateCPU(cpu_matrix, n*n);
 env->ReleasePrimitiveArrayCritical(fb, cpu_matrix, 0);
 
@@ -659,7 +659,7 @@ power(float *cpu_m, int n, bool fresh) {
   gettimeofday(&end, 0);
   double milli = (end.tv_sec - start.tv_sec) * 1000 + (end.tv_usec - start.tv_usec) * .001;
 
-  CUDA_CALL(cudaMemcpy(cpu_m, gpu_m, n*n*sizeof(float), cudaMemcpyDeviceToHost));
+  CUDA_CALL(cudaMemcpy(cpu_m, gpu_src, n*n*sizeof(float), cudaMemcpyDeviceToHost));
   cout << "DONE, DM^" << dense_m << ", time = " << milli << "ms\n";
 
   return 0;
