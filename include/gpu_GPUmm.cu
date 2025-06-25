@@ -123,6 +123,7 @@ staySparse(int n, int nnz) {
 __global__ void countNNZ_kernel(const float* mat, int size, int* nnz_counter) {
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += blockDim.x * gridDim.x) {
       if (mat[i] != 0.0f) {
+          //add 1 to nnz_counter when mat[i] isn't 0
           atomicAdd(nnz_counter, 1);
       }
   }
