@@ -123,6 +123,7 @@ staySparse(int n, int nnz) {
 __global__ void countNNZ_kernel(const float* mat, int size, int* nnz_counter) {
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += blockDim.x * gridDim.x) {
       if (mat[i] != 0.0f) {
+          //add 1 to nnz_counter when mat[i] isn't 0
           atomicAdd(nnz_counter, 1);
       }
   }
@@ -659,7 +660,7 @@ power(float *cpu_m, int n, bool fresh) {
   gettimeofday(&end, 0);
   double milli = (end.tv_sec - start.tv_sec) * 1000 + (end.tv_usec - start.tv_usec) * .001;
 
-  CUDA_CALL(cudaMemcpy(cpu_m, gpu_m, n*n*sizeof(float), cudaMemcpyDeviceToHost));
+  CUDA_CALL(cudaMemcpy(cpu_m, gpu_src, n*n*sizeof(float), cudaMemcpyDeviceToHost));
   cout << "DONE, DM^" << dense_m << ", time = " << milli << "ms\n";
 
   return 0;
